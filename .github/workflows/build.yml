@@ -1,0 +1,84 @@
+name: Build
+
+# Builds the single-file page on every commit and keeps it as a downloadable
+# artifact. Commits to the default branch are also published to GitHub Pages.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The toolchain and the wasm32 target are pinned in rust-toolchain.toml.
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      # The committed dist/ is ignored: the page that is tested, attached and
+      # published is always the one built here from the sources.
+      - name: Build page from scratch
+        run: |
+          rm -rf dist target
+          cargo xtask build
+
+      # The build is reproducible, so a difference means the sources changed
+      # without the page being rebuilt and committed.
+      - name: Check the committed page matches the build
+        run: |
+          git ls-files --error-unmatch dist/frost-wallet.html
+          if ! git diff --quiet -- dist/frost-wallet.html; then
+            echo "::error file=dist/frost-wallet.html::The committed page does not match the sources. Run 'cargo xtask build' and commit dist/frost-wallet.html."
+            echo "built:     $(sha256sum < dist/frost-wallet.html)"
+            echo "committed: $(git show HEAD:dist/frost-wallet.html | sha256sum)"
+            exit 1
+          fi
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Upload page
+        uses: actions/upload-artifact@v4
+        with:
+          name: frost-wallet
+          path: dist/frost-wallet.html
+          if-no-files-found: error
+
+      # GitHub Pages serves index.html at the site root.
+      - name: Prepare Pages site
+        if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
+        run: |
+          mkdir site
+          cp dist/frost-wallet.html site/index.html
+          cp dist/frost-wallet.html site/frost-wallet.html
+          sha256sum dist/frost-wallet.html | tee site/SHA256SUMS.txt
+
+      - name: Upload Pages site
+        if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

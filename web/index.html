@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- The page cannot talk to the network: no connect-src, no remote scripts,
+     styles, images or frames. Only the one inline script below may run. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-@@SCRIPT_SHA256@@' 'wasm-unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; media-src blob: mediastream:; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="google" content="notranslate">
+<meta name="color-scheme" content="light dark">
+<title>FROST Wallet</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b1220'/%3E%3Cg stroke='%237cc4ff' stroke-width='2.4' stroke-linecap='round'%3E%3Cpath d='M16 6v20M7.3 11l17.4 10M7.3 21l17.4-10'/%3E%3C/g%3E%3C/svg%3E">
+<style>/*@@CSS@@*/</style>
+</head>
+<body>
+<noscript><p class="fatal">FROST Wallet needs JavaScript and WebAssembly. Everything runs locally in this page; nothing is sent anywhere.</p></noscript>
+<div id="app"><p class="boot">Loading wallet core…</p></div>
+<div id="sheet" hidden></div>
+<div id="toasts" aria-live="polite"></div>
+<script id="wasm" type="application/octet-stream">@@WASM@@</script>
+<script>/*@@JS@@*/</script>
+</body>
+</html>
