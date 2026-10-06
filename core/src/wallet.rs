@@ -218,15 +218,6 @@ impl Wallet {
                 let done = self.import(blob)?;
                 Ok(json!({ "message": done.message, "tab": done.tab, "more": done.more }))
             }
-            "qr" => {
-                let matrix = crate::qr::encode(str_field(req, "text")?)?;
-                let bits: String = matrix
-                    .modules
-                    .iter()
-                    .map(|dark| if *dark { '1' } else { '0' })
-                    .collect();
-                Ok(json!({ "width": matrix.width, "bits": bits }))
-            }
             "verify" => {
                 let pubkey = xonly_key(str_field(req, "pubkey")?).ok_or(
                     "The public key must be 32 bytes of hex (x-only) or 33 bytes (compressed).",

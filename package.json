@@ -1,0 +1,22 @@
+{
+  "name": "frost-wallet",
+  "version": "0.1.0",
+  "description": "Offline FROST threshold wallet in a single HTML file",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "cargo test --locked && node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "jsqr": "1.4.0",
+    "uqr": "0.1.3"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

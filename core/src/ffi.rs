@@ -52,21 +52,6 @@ pub unsafe extern "C" fn fw_call(ptr: *mut u8, len: usize) -> u64 {
     give(response.into_bytes())
 }
 
-/// Decodes the QR codes in an RGBA image; returns a JSON array of strings.
-///
-/// # Safety
-/// `ptr` must describe a buffer of `4 * width * height` bytes obtained from
-/// [`fw_alloc`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn fw_qr_decode(ptr: *mut u8, width: usize, height: usize) -> u64 {
-    let Some(len) = width.checked_mul(height).and_then(|px| px.checked_mul(4)) else {
-        return give(b"[]".to_vec());
-    };
-    let image = unsafe { take(ptr, len) };
-    let found = crate::qr::decode_rgba(&image.0, width, height);
-    give(serde_json::Value::from(found).to_string().into_bytes())
-}
-
 /// An input buffer taken back from the page; wiped when dropped, since
 /// requests may carry secret backups.
 struct Input(Box<[u8]>);

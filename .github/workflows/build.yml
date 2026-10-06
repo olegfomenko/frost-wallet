@@ -25,11 +25,19 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
 
-      - name: Build page
-        run: cargo xtask build
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Exactly the versions recorded in package-lock.json.
+      - name: Install JavaScript dependencies
+        run: npm ci
 
       - name: Test
-        run: cargo test --locked
+        run: npm test
+
+      - name: Build page
+        run: npm run build
 
       - name: Upload page
         uses: actions/upload-artifact@v4

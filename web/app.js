@@ -1,5 +1,4 @@
-(() => {
-'use strict';
+import { decodeQr, encodeQr } from './qr.js';
 
 // The page as it was loaded, taken before anything here touches the document,
 // so that it can be saved again from the page itself. The file is laid out
@@ -11,8 +10,9 @@ const PAGE_SOURCE = `<!doctype html>\n${document.documentElement.outerHTML}\n`;
 // the views below render. Payloads travel as one base64 string, whether they
 // are shown as a QR code, copied as text or saved as a file.
 
-const VERSION = '@@VERSION@@';
-const WASM_SHA256 = '@@WASM_SHA256@@';
+// Filled in by the build.
+const VERSION = __VERSION__;
+const WASM_SHA256 = __WASM_SHA256__;
 const MAGIC = [0x15, 0x14, 0x93];
 const PART = /^frostqr:(\d{1,3})\/(\d{1,3}):([A-Za-z0-9+/]{6}):([A-Za-z0-9+/]+)$/;
 // Characters of payload per QR symbol before it is split into a sequence.
@@ -89,10 +89,6 @@ function call(req) {
   if (res.state) S = res.state;
   if (!res.ok) throw new Error(res.error);
   return res.result;
-}
-
-function qrDecode(rgba, width, height) {
-  return JSON.parse(dec.decode(take(wasm.fw_qr_decode(put(rgba), width, height))));
 }
 
 // ---------------------------------------------------------------- bytes
@@ -660,15 +656,15 @@ function qrParts(data) {
 function qrSvg(text) {
   let svg = qrCache.get(text);
   if (svg) return svg;
-  const { width, bits } = call({ op: 'qr', text });
+  const { width, modules } = encodeQr(text);
   const quiet = 4;
   const size = width + 2 * quiet;
   let path = '';
   for (let y = 0; y < width; y++) {
     for (let x = 0; x < width; x++) {
-      if (bits[y * width + x] !== '1') continue;
+      if (!modules[y][x]) continue;
       let run = 1;
-      while (x + run < width && bits[y * width + x + run] === '1') run++;
+      while (x + run < width && modules[y][x + run]) run++;
       path += `M${x + quiet} ${y + quiet}h${run}v1h-${run}z`;
       x += run;
     }
@@ -907,7 +903,7 @@ function scanSource(source, width, height, limit, zoom = 1) {
   ctx.fillStyle = '#fff';
   ctx.fillRect(0, 0, w, h);
   ctx.drawImage(source, 0, 0, w, h);
-  return qrDecode(ctx.getImageData(0, 0, w, h).data, w, h);
+  return decodeQr(ctx.getImageData(0, 0, w, h).data, w, h);
 }
 
 function loadImage(file) {
@@ -1199,4 +1195,3 @@ window.addEventListener('beforeunload', (event) => {
 boot().catch((error) => {
   $('#app').innerHTML = `<p class="fatal">The wallet core failed to start: ${esc(error.message)}. This browser may not support WebAssembly.</p>`;
 });
-})();

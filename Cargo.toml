@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["core", "xtask"]
+members = ["core"]
 
 [workspace.package]
 version = "0.1.0"
@@ -8,7 +8,7 @@ edition = "2024"
 license = "MIT"
 
 # The wallet core is compiled to WebAssembly with this profile and inlined
-# into the single-file page by `cargo xtask build`.
+# into the single-file page by `npm run build`.
 [profile.release]
 opt-level = 3
 lto = true

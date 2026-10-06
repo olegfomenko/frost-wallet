@@ -11,17 +11,22 @@ own risk.
 ## Build
 
 ```bash
-cargo xtask build
+npm ci
+npm run build
 ```
 
-This compiles `core/` to WebAssembly and inlines it, with the stylesheet and script from
-`web/`, into `dist/frost-wallet.html`. That file is the whole application: copy it to any
-device and open it in a browser. The only build dependency is the Rust toolchain pinned in
-`rust-toolchain.toml` (it installs the `wasm32-unknown-unknown` target on first use); there
-are no JavaScript dependencies and no bundler.
+This compiles `core/` to WebAssembly, bundles the script from `web/`, and inlines both, with
+the stylesheet, into `dist/frost-wallet.html`. That file is the whole application: copy it to
+any device and open it in a browser.
+
+You need Node 20 or later and the Rust toolchain pinned in `rust-toolchain.toml` (it installs
+the `wasm32-unknown-unknown` target on first use). The page has two runtime JavaScript
+dependencies, both for QR codes: [uqr](https://github.com/unjs/uqr) draws them and
+[jsQR](https://github.com/cozmo/jsQR) reads them. [esbuild](https://esbuild.github.io)
+bundles the script, unminified. All three are pinned to exact versions.
 
 ```bash
-cargo test    # runs full keygen, signing and backup sessions through the core's JSON API
+npm test    # Rust: full keygen, signing and backup sessions; JavaScript: QR round trips
 ```
 
 `dist/` is not committed. `.github/workflows/build.yml` builds the page from the sources on
@@ -98,10 +103,13 @@ ChillDKG reference (`transcript || cert`).
 
 ## Layout
 
-- `core/` — the wallet, in Rust: `wallet.rs` (session model behind a JSON API), `wire.rs`
-  (blobs), `qr.rs` (QR encode and decode), `ffi.rs` (the WebAssembly boundary).
-- `web/` — the page: `index.html`, `app.css`, `app.js`. A thin view over the core.
-- `xtask/` — the build step that produces the single file.
+- `core/` — the part in Rust: `wallet.rs` (the session flow, behind a JSON API), `wire.rs`
+  (encoding of the blobs), `ffi.rs` (the WebAssembly boundary). It holds every secret and
+  decides what reaches the ChillDKG and FROST drivers.
+- `web/` — the page: `index.html`, `app.css`, `app.js` (the interface and all input and
+  output), `qr.js` (QR codes).
+- `scripts/build.mjs` — the build step that produces the single file.
+- `test/` — JavaScript tests; the Rust ones are in `core/tests/`.
 
 ## Security notes
 

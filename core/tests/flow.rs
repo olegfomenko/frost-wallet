@@ -1,7 +1,6 @@
 //! Drives complete sessions through the JSON API, the way the page does:
 //! one coordinator wallet and `n` participant wallets exchanging text blobs.
 
-use frost_wallet_core::qr;
 use frost_wallet_core::wallet::Wallet;
 use serde_json::{Value, json};
 
@@ -303,35 +302,4 @@ fn too_few_nonces_are_refused() {
     // Refused up front, so the session survives and can still collect nonces.
     assert!(try_call(&mut g.coordinator, json!({ "op": "c_sign_package" })).is_err());
     assert_eq!(state(&mut g.coordinator)["sign"]["stage"], "round1");
-}
-
-#[test]
-fn qr_round_trip() {
-    let mut g = keygen(3, 2);
-    let text = state(&mut g.coordinator)["group"]["recovery"]["data"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    for payload in [&text[..60], &text[..400], &text[..]] {
-        let m = qr::encode(payload).unwrap();
-        // Rasterise at 4 px per module with a 4-module quiet zone.
-        let (scale, quiet) = (4, 4);
-        let side = (m.width + 2 * quiet) * scale;
-        let mut luma = vec![255u8; side * side];
-        for y in 0..m.width {
-            for x in 0..m.width {
-                if m.modules[y * m.width + x] {
-                    for dy in 0..scale {
-                        for dx in 0..scale {
-                            luma[((y + quiet) * scale + dy) * side + (x + quiet) * scale + dx] = 0;
-                        }
-                    }
-                }
-            }
-        }
-        assert_eq!(
-            qr::decode_luma(&luma, side, side),
-            vec![payload.to_string()]
-        );
-    }
 }
