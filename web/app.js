@@ -1,6 +1,11 @@
 (() => {
 'use strict';
 
+// The page as it was loaded, taken before anything here touches the document,
+// so that it can be saved again from the page itself. The file is laid out
+// the way the browser serialises it, which makes this an exact copy.
+const PAGE_SOURCE = `<!doctype html>\n${document.documentElement.outerHTML}\n`;
+
 // The page is a thin view over the WebAssembly core. Every action is a JSON
 // request to the core; every response carries the state snapshot `S` that
 // the views below render. Payloads travel as one base64 string, whether they
@@ -601,7 +606,8 @@ function render() {
       }</div>${tabs}
     </header>${body}
     <footer><p>Nothing leaves this page: its Content-Security-Policy blocks all network access, and nothing is written to browser storage. Unaudited software — use at your own risk.</p>
-    <p class="mono">v${VERSION} · core sha256 ${WASM_SHA256.slice(0, 16)}…</p></footer>`;
+    <p class="mono">v${VERSION} · core sha256 ${WASM_SHA256.slice(0, 16)}…</p>
+    <p><button class="btn mini" data-act="download-page">${ICON.down}Download this page</button> to keep a copy and open it on an offline device.</p></footer>`;
   document.querySelectorAll('.out').forEach(mountOut);
 }
 
@@ -718,11 +724,13 @@ async function copyText(text) {
   }
 }
 
-function download(name, text) {
-  const url = URL.createObjectURL(new Blob([`${text}\n`], { type: 'text/plain' }));
+const download = (name, text) => saveFile(`${name}.txt`, `${text}\n`, 'text/plain');
+
+function saveFile(filename, content, type) {
+  const url = URL.createObjectURL(new Blob([content], { type }));
   const a = document.createElement('a');
   a.href = url;
-  a.download = `${name}.txt`;
+  a.download = filename;
   document.body.append(a);
   a.click();
   a.remove();
@@ -1082,6 +1090,7 @@ const actions = {
     const { out } = outs[el.closest('.out').dataset.out];
     download(out.name, out.data);
   },
+  'download-page': () => saveFile('frost-wallet.html', PAGE_SOURCE, 'text/html'),
   'out-mode': (el) => {
     ui.outMode = el.dataset.mode;
     render();

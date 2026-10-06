@@ -24,12 +24,13 @@ are no JavaScript dependencies and no bundler.
 cargo test    # runs full keygen, signing and backup sessions through the core's JSON API
 ```
 
-`dist/frost-wallet.html` is committed, so the page can be downloaded straight from the
-repository; rebuild it before committing source changes. CI never uses that copy:
-`.github/workflows/build.yml` deletes it and rebuilds the page from the sources on every
-commit, with no build cache, runs the tests, and attaches the result to the run as an
-artifact. Commits to the default branch are also published to GitHub Pages (enable it once
-under *Settings → Pages → Source: GitHub Actions*), together with `SHA256SUMS.txt`.
+`dist/` is not committed. `.github/workflows/build.yml` builds the page from the sources on
+every commit, with no build cache, runs the tests and attaches `frost-wallet.html` to the run
+as an artifact. Commits to the default branch are also published to GitHub Pages (enable it
+once under *Settings → Pages → Source: GitHub Actions*), together with `SHA256SUMS.txt`.
+
+The page has a **Download this page** button in its footer. It saves an exact copy of the
+page as it was served, to carry to an offline device.
 
 ## Using it
 

@@ -25,24 +25,8 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
 
-      # The committed dist/ is ignored: the page that is tested, attached and
-      # published is always the one built here from the sources.
-      - name: Build page from scratch
-        run: |
-          rm -rf dist target
-          cargo xtask build
-
-      # The build is reproducible, so a difference means the sources changed
-      # without the page being rebuilt and committed.
-      - name: Check the committed page matches the build
-        run: |
-          git ls-files --error-unmatch dist/frost-wallet.html
-          if ! git diff --quiet -- dist/frost-wallet.html; then
-            echo "::error file=dist/frost-wallet.html::The committed page does not match the sources. Run 'cargo xtask build' and commit dist/frost-wallet.html."
-            echo "built:     $(sha256sum < dist/frost-wallet.html)"
-            echo "committed: $(git show HEAD:dist/frost-wallet.html | sha256sum)"
-            exit 1
-          fi
+      - name: Build page
+        run: cargo xtask build
 
       - name: Test
         run: cargo test --locked

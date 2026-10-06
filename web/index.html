@@ -1,10 +1,13 @@
 <!doctype html>
-<html lang="en" translate="no">
-<head>
+<html lang="en" translate="no"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <!-- The page cannot talk to the network: no connect-src, no remote scripts,
-     styles, images or frames. Only the one inline script below may run. -->
+     styles, images or frames. Only the one inline script below may run.
+
+     This file is written the way a browser serialises it (attribute quoting,
+     no line break before the closing body tag), so that the page can hand
+     out an exact copy of itself: see PAGE_SOURCE in the script. -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-@@SCRIPT_SHA256@@' 'wasm-unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; media-src blob: mediastream:; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="google" content="notranslate">
@@ -16,9 +19,7 @@
 <body>
 <noscript><p class="fatal">FROST Wallet needs JavaScript and WebAssembly. Everything runs locally in this page; nothing is sent anywhere.</p></noscript>
 <div id="app"><p class="boot">Loading wallet core…</p></div>
-<div id="sheet" hidden></div>
+<div id="sheet" hidden=""></div>
 <div id="toasts" aria-live="polite"></div>
 <script id="wasm" type="application/octet-stream">@@WASM@@</script>
-<script>/*@@JS@@*/</script>
-</body>
-</html>
+<script>/*@@JS@@*/</script></body></html>

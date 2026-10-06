@@ -103,6 +103,8 @@ p + p { margin-top: .6em; }
 main { padding-top: 20px; padding-bottom: 28px; display: grid; gap: 14px; }
 footer { padding-top: 4px; padding-bottom: calc(28px + env(safe-area-inset-bottom)); color: var(--muted); font-size: .78rem; }
 footer p + p { margin-top: .35em; }
+footer .btn { margin-right: 6px; vertical-align: middle; }
+footer .btn svg { width: 14px; height: 14px; }
 
 /* ------------------------------------------------------------- cards */
 

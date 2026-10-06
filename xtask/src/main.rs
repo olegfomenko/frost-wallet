@@ -14,16 +14,14 @@ const WASM: &str = "frost_wallet_core.wasm";
 const OUTPUT: &str = "dist/frost-wallet.html";
 
 fn main() -> ExitCode {
-    match env::args().nth(1).as_deref() {
-        Some("build") => match build() {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("error: {error}");
-                ExitCode::FAILURE
-            }
-        },
-        _ => {
-            eprintln!("usage: cargo xtask build");
+    let result = match env::args().nth(1).as_deref() {
+        Some("build") => build(),
+        _ => Err("usage: cargo xtask build".into()),
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: {error}");
             ExitCode::FAILURE
         }
     }
@@ -83,9 +81,8 @@ fn build() -> Result<(), String> {
 }
 
 /// Compiler flags that replace machine-specific source paths, which end up
-/// in the module's panic messages, with fixed ones. Without them the page
-/// would differ from one machine to the next (and carry the builder's home
-/// directory); with them the same sources give the same bytes everywhere.
+/// in the module's panic messages, with fixed ones, so that a published page
+/// does not carry the builder's home directory.
 fn remap_flags(root: &Path) -> Result<String, String> {
     let rustc = |args: &[&str]| -> Result<String, String> {
         let output = Command::new(env::var("RUSTC").unwrap_or_else(|_| "rustc".into()))
