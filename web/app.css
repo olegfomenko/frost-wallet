@@ -228,6 +228,16 @@ details[open] > summary { margin-bottom: 10px; }
 .tally { padding: 8px 10px; border-radius: 10px; background: var(--sunken); min-height: 46px; }
 .tally .mono { max-height: 5.5em; overflow: auto; }
 
+.tx { display: grid; gap: 12px; }
+.totals { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+.mono.big { font-size: 1.02rem; font-weight: 650; }
+.lines { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.lines li { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; padding: 9px 11px; border-radius: 10px; background: var(--sunken); }
+.lines .grow { display: grid; gap: 2px; min-width: 12em; flex: 1 1 12em; }
+.lines .amount { display: grid; gap: 4px; justify-items: end; margin-left: auto; white-space: nowrap; }
+.kv .qr { margin-top: 8px; }
+.btn.mini[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+
 .msgbox { background: var(--sunken); border: 1px solid var(--line); border-radius: 10px; padding: 12px; white-space: pre-wrap; max-height: 15em; overflow: auto; }
 
 .verdict { display: flex; align-items: center; gap: 12px; padding: 14px; border-radius: 12px; font-weight: 700; font-size: 1.05rem; }

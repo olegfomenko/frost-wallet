@@ -1,4 +1,7 @@
+import { account, analyzePsbt, finalizePsbt, formatBtc, isPsbt, isSighashMessage, NETWORKS, psbtFromText } from './bitcoin.js';
+import { loadCore } from './core.js';
 import { decodeQr, encodeQr } from './qr.js';
+import { isUr, psbtToUr, UrReader } from './ur.js';
 
 // The page as it was loaded, taken before anything here touches the document,
 // so that it can be saved again from the page itself. The file is laid out
@@ -25,7 +28,7 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`)
 const no = (idx) => `#${idx + 1}`;
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
-let wasm = null;
+let core = null;
 let S = { role: null };
 let outs = [];
 let timers = [];
@@ -42,6 +45,12 @@ const newEntropy = () => ({ device: true, strokes: [], points: 0, dice: '', coin
 // What dice and coins must add up to when they are the only source.
 const MIN_ENTROPY_BITS = 128;
 
+// A transaction being worked on. It lives in the page only: the core signs
+// its inputs one by one as ordinary messages and knows nothing of it.
+// `signatures` maps an input to its finished signature; `pending` is the
+// input the current session is signing.
+const newPsbt = () => ({ text: '', bytes: null, signatures: {}, pending: null });
+
 const ui = {
   tab: null,
   outMode: 'qr',
@@ -53,48 +62,29 @@ const ui = {
   draft: newDraft(),
   verify: { ...newDraft(), pubkey: '', sig: '' },
   entropy: newEntropy(),
+  // Bitcoin: which network addresses are written for, which address is
+  // shown, and which of the wallet's QR codes is open.
+  network: 'mainnet',
+  address: { chain: 0, index: 0 },
+  walletQr: null,
+  // What the coordinator is about to have signed: a message or a transaction.
+  signMode: 'message',
+  psbt: newPsbt(),
 };
 
-const sheet = { open: false, mode: 'paste', hint: '', seen: new Set(), done: new Set(), asm: null };
+const sheet = { open: false, mode: 'paste', hint: '', target: '', seen: new Set(), done: new Set(), asm: null, ur: null };
 const cam = { stream: null, timer: 0, last: '', lastAt: 0, canvas: document.createElement('canvas') };
 
 // ---------------------------------------------------------------- core bridge
 
 async function boot() {
-  const b64 = $('#wasm').textContent.trim();
-  const { instance } = await WebAssembly.instantiate(fromBase64(b64), {
-    env: {
-      fw_random(ptr, len) {
-        crypto.getRandomValues(new Uint8Array(wasm.memory.buffer, ptr, len));
-      },
-    },
-  });
-  wasm = instance.exports;
+  core = await loadCore(fromBase64($('#wasm').textContent.trim()));
   call({ op: 'state' });
   render();
 }
 
-function put(bytes) {
-  const ptr = wasm.fw_alloc(bytes.length);
-  new Uint8Array(wasm.memory.buffer, ptr, bytes.length).set(bytes);
-  return ptr;
-}
-
-// Copies a result out of the module's memory, then wipes and frees it there.
-function take(packed) {
-  const ptr = Number(packed >> 32n);
-  const len = Number(packed & 0xffffffffn);
-  const view = new Uint8Array(wasm.memory.buffer, ptr, len);
-  const copy = view.slice();
-  view.fill(0);
-  wasm.fw_free(ptr, len);
-  return copy;
-}
-
 function call(req) {
-  const bytes = enc.encode(JSON.stringify(req));
-  const res = JSON.parse(dec.decode(take(wasm.fw_call(put(bytes), bytes.length))));
-  bytes.fill(0);
+  const res = core(req);
   if (res.state) S = res.state;
   if (!res.ok) throw new Error(res.error);
   return res.result;
@@ -146,8 +136,10 @@ const ICON = {
 
 // ---------------------------------------------------------------- building blocks
 
-const importBtn = (label, hint, primary = true) =>
-  `<button class="btn ${primary ? 'primary' : ''}" data-act="import" data-hint="${esc(hint)}">${ICON.down}${esc(label)}</button>`;
+// `target` narrows what the import sheet takes: 'psbt' for a transaction
+// only. Without it the sheet takes the wallet's own messages and backups.
+const importBtn = (label, hint, primary = true, target = '') =>
+  `<button class="btn ${primary ? 'primary' : ''}" data-act="import" data-hint="${esc(hint)}" data-target="${target}">${ICON.down}${esc(label)}</button>`;
 
 const kv = (label, value, copy = true) =>
   `<div><dt>${esc(label)}</dt><dd><span class="mono">${esc(value)}</span>${
@@ -207,6 +199,157 @@ function messageInput(group) {
   return `<div class="field"><div class="head"><span class="label">Message</span><div class="seg">${seg}</div></div>
     <textarea rows="4" class="${d.mode === 'text' ? '' : 'mono'}" data-bind="${group}.value" placeholder="${hint}" spellcheck="false" autocomplete="off" autocapitalize="off">${esc(d.value)}</textarea>
     <span class="muted small">Enter the raw message. The wallet always signs and verifies its SHA-256 digest.</span></div>`;
+}
+
+// ---------------------------------------------------------------- bitcoin
+
+const networkSeg = () =>
+  `<div class="seg">${Object.entries(NETWORKS)
+    .map(([id, network]) => `<button data-act="network" data-network="${id}" aria-pressed="${ui.network === id}">${network.label}</button>`)
+    .join('')}</div>`;
+
+// The group key as a Bitcoin wallet, for the selected network.
+let walletMemo = null;
+function wallet() {
+  const key = `${S.group.pubkey}/${ui.network}`;
+  if (walletMemo?.key !== key) walletMemo = { key, value: account(S.group.pubkey, ui.network) };
+  return walletMemo.value;
+}
+
+// A transaction (a PSBT in base64) as this device reads it. Every device
+// works this out for itself; nothing about it is taken from the sender's word.
+let txMemo = null;
+function readTx(psbt) {
+  const key = `${S.group.pubkey}/${ui.network}`;
+  if (txMemo?.psbt !== psbt || txMemo.key !== key) {
+    let value;
+    try {
+      value = analyzePsbt(fromBase64(psbt), S.group.pubkey, ui.network);
+    } catch (error) {
+      value = { error: error.message };
+    }
+    txMemo = { psbt, key, value };
+  }
+  return txMemo.value;
+}
+
+const pathLabel = (path) => `m/${path.join('/')}`;
+
+function txBlock(tx, current = null) {
+  if (tx.error) return `<div class="note danger"><b>This transaction cannot be read.</b> ${esc(tx.error)}</div>`;
+  const inputChip = { sign: ['', 'this wallet'], signed: ['', 'already signed'], foreign: ['', 'not this wallet'], unsupported: ['warn', 'cannot be signed'], wrongtype: ['danger', 'not a Taproot address'] };
+  const chipFor = (input) => (input.index === current ? '<span class="chip good">this request</span>' : `<span class="chip ${inputChip[input.status][0]}">${inputChip[input.status][1]}</span>`);
+  const row = (title, sub, amount, chip) => `<li><div class="grow"><span class="mono">${esc(title)}</span>${sub ? `<span class="muted small">${esc(sub)}</span>` : ''}</div>
+    <div class="amount"><span class="mono">${amount === null ? 'unknown' : `${formatBtc(amount)} BTC`}</span>${chip}</div></li>`;
+  return `<div class="tx">
+    <div class="row">${networkSeg()}<span class="muted small">Only changes how addresses are written.</span></div>
+    ${tx.warnings.map((warning) => `<div class="note warn">${esc(warning)}</div>`).join('')}
+    <dl class="kv totals">
+      <div><dt>Leaves the wallet</dt><dd><span class="mono big">${formatBtc(tx.spent)} BTC</span></dd></div>
+      <div><dt>Fee</dt><dd><span class="mono big">${tx.fee === null ? 'unknown' : `${formatBtc(tx.fee)} BTC`}</span></dd></div>
+    </dl>
+    <h3>Outputs</h3>
+    <ul class="lines">${tx.outputs.map((o) => row(o.address, o.ours ? `${o.ours === 'change' ? 'Change, back to this wallet' : 'To this wallet'} · ${pathLabel(o.path)}` : '', o.amount,
+      o.ours ? `<span class="chip good">${o.ours === 'change' ? 'change' : 'yours'}</span>` : o.unspendable ? '<span class="chip danger">this key, unspendable</span>' : '<span class="chip accent">payment</span>')).join('')}</ul>
+    <h3>Inputs</h3>
+    <ul class="lines">${tx.inputs.map((i) => row(i.address, `${i.txid.slice(0, 12)}…:${i.vout}${i.path ? ` · ${pathLabel(i.path)}` : ''}`, i.amount,
+      chipFor(i))).join('')}</ul>
+    <p class="muted small">${tx.items.length ? `${plural(tx.items.length, 'signature')} to make, one for each input of this wallet, each in a signing session of its own.` : 'Nothing here for this key to sign.'}</p>
+  </div>`;
+}
+
+// The transaction loaded on this device, if any, as this device reads it.
+const loadedTx = () => (ui.psbt.bytes && S.group ? readTx(toBase64(ui.psbt.bytes)) : null);
+
+// The input of a transaction that a signing request is for: the one whose
+// signature hash message is exactly the message of the request, under
+// exactly the request's key. Null if there is none.
+function matchInput(tx, sign) {
+  if (!tx || tx.error) return null;
+  const same = (item) => item.message === sign.msg.hex && item.key === sign.key && JSON.stringify(item.tweaks) === JSON.stringify(sign.tweaks);
+  return tx.items.find(same) ?? null;
+}
+const requestedInput = (sign) => matchInput(loadedTx(), sign);
+
+// What a signing session signs. A request for an input of the loaded
+// transaction is shown as that; anything else as the message it is.
+function sessionBlock(sign) {
+  const item = requestedInput(sign);
+  const raw = `${messageBlock(sign.msg)}${tweakList(sign.tweaks)}<dl class="kv">${kv('Verifies under (x-only)', sign.key)}</dl>`;
+  if (item) {
+    return `<div class="note good"><b>Signs input ${item.input + 1} of this transaction.</b> The request matches the transaction loaded on this device, hash and key.</div>
+      ${txBlock(loadedTx(), item.input)}
+      <details><summary>The message itself</summary>${raw}</details>`;
+  }
+  if (isSighashMessage(sign.msg.hex)) {
+    return `<div class="note"><b>This request is for an input of a Bitcoin transaction.</b> By itself it does not say what the transaction pays. You can add the transaction (PSBT) to see that here; it is optional, and it is checked against this request.</div>
+      <div class="row">${importBtn('Add the transaction', 'Scan, paste or open the transaction (PSBT) this request is for. It is accepted only if it is the transaction of this request.', false, 'psbt')}</div>
+      ${raw}`;
+  }
+  return raw;
+}
+
+// The transaction with the signatures collected so far put in.
+function signedTx() {
+  const tx = loadedTx();
+  try {
+    return finalizePsbt(ui.psbt.bytes, tx.items, ui.psbt.signatures);
+  } catch (error) {
+    return { error: error.message };
+  }
+}
+
+// A finished session that was signing an input of the loaded transaction
+// hands its signature over to it, and makes room for the next input.
+function collectSignature() {
+  const { pending } = ui.psbt;
+  if (S.role !== 'coordinator' || pending === null || S.sign?.stage !== 'done') return;
+  const item = requestedInput(S.sign);
+  if (!item || item.input !== pending) return;
+  ui.psbt.signatures[pending] = S.sign.signature.sig;
+  ui.psbt.pending = null;
+  call({ op: 'c_sign_abort' });
+  const left = loadedTx().items.length - Object.keys(ui.psbt.signatures).length;
+  toast(left ? `Input ${pending + 1} signed. ${plural(left, 'input')} to go.` : 'All inputs signed.');
+}
+
+function viewBitcoin() {
+  if (!S.group) {
+    return `<section class="card"><h2>No group key loaded</h2><p>The Bitcoin addresses belong to a group key. Generate one, or restore it from a backup.</p>
+      <div class="row"><button class="btn primary" data-act="tab" data-tab="keygen">Key generation</button></div></section>`;
+  }
+  const w = wallet();
+  const { chain, index } = ui.address;
+  const key = w.address(chain, index);
+  const chainSeg = [[0, 'Receive'], [1, 'Change']]
+    .map(([id, label]) => `<button data-act="address-chain" data-chain="${id}" aria-pressed="${chain === id}">${label}</button>`).join('');
+  const withQr = (label, id, value) => `<div><dt>${esc(label)}</dt><dd><span class="mono">${esc(value)}</span>
+      <button class="btn mini" data-act="copy" data-val="${esc(value)}">Copy</button>
+      <button class="btn mini" data-act="wallet-qr" data-qr="${id}" aria-pressed="${ui.walletQr === id}">QR</button></dd>
+      ${ui.walletQr === id ? `<div class="qr">${qrSvg(value)}</div>` : ''}</div>`;
+  return `<section class="card">
+      <div class="head"><h2>Receive</h2>${networkSeg()}</div>
+      <div class="qr">${qrSvg(key.address)}</div>
+      <dl class="kv"><div><dt>Address ${pathLabel(key.path)}</dt><dd><span class="mono big">${esc(key.address)}</span>
+        <button class="btn mini" data-act="copy" data-val="${esc(key.address)}">Copy</button></dd></div></dl>
+      <div class="row"><div class="seg">${chainSeg}</div>
+        <button class="btn mini" data-act="address-step" data-step="-1" ${index ? '' : 'disabled'} aria-label="Previous address">◀</button>
+        <span class="mono">#${index}</span>
+        <button class="btn mini" data-act="address-step" data-step="1" aria-label="Next address">▶</button></div>
+      <p class="muted small">A Taproot address of the ${S.group.t}-of-${S.group.n} group key. Spending from it takes ${S.group.t} of the participants. Use a fresh address for every payment.</p>
+    </section>
+    <section class="card">
+      <h2>Watch-only wallet</h2>
+      <p class="muted small">Import the descriptor into your Bitcoin wallet. It will show the balance, hand out these same addresses and prepare transactions (PSBTs) for this key to sign. It holds no secrets.</p>
+      <dl class="kv">
+        ${withQr('Descriptor', 'descriptor', w.descriptor)}
+        ${withQr('Extended public key', 'xpub', w.xpub)}
+        ${kv('Master fingerprint', w.fingerprint)}
+      </dl>
+      <div class="note warn"><b>Import the descriptor, not the bare xpub.</b> An xpub does not say what kind of address to make from it. A wallet given only the xpub shows legacy addresses (starting with 1), and this key cannot spend from those: it makes Taproot signatures only. Its addresses start with ${ui.network === 'mainnet' ? 'bc1p' : ui.network === 'regtest' ? 'bcrt1p' : 'tb1p'}; if the other wallet shows anything else, do not send coins there.</div>
+    </section>
+    <section class="card flat"><p class="small muted">Addresses are BIP 32 children of the group key, <span class="mono">m/0/*</span> for receiving and <span class="mono">m/1/*</span> for change, spent by key path only (as in BIP 86). The group key gets its chain code from BIP 328. To spend, build the transaction in the watch-only wallet and bring the PSBT to the coordinator's Sign tab.</p>
+      <div class="note warn">Unaudited software. Try it on testnet or with a small amount first, and check that the watch-only wallet shows the same addresses.</div></section>`;
 }
 
 function tweakList(tweaks) {
@@ -521,19 +664,23 @@ function viewSignParticipant() {
   }
   if (!s) {
     return `<section class="card"><h2>Waiting for a signing request</h2>
-      <p>The coordinator sends the message to sign. You review it here before anything is signed.</p>
-      <div class="row">${importBtn('Import signing request', 'Import the signing request from the coordinator.')}</div></section>`;
+      <p>The coordinator sends what is to be signed. You review it here before anything is signed.</p>
+      <div class="row">${importBtn('Import signing request', 'Import the signing request from the coordinator.')}</div>
+      <p class="muted small">For a Bitcoin transaction, the request comes first; you are then asked for the transaction itself, to see what the request signs.</p>
+    </section>`;
   }
   const labels = ['Review', 'Nonce', 'Sign'];
-  const key = `<dl class="kv">${kv('Verifies under (x-only)', s.key)}${kv('Session', s.ssid.slice(0, 8), false)}</dl>`;
+  const item = requestedInput(s);
+  const what = `${sessionBlock(s)}<dl class="kv">${kv('Session', s.ssid.slice(0, 8), false)}</dl>`;
   if (s.stage === 'failed') {
     return `<section class="card"><h2>Signing</h2>${failure(s.error, 'p_sign_abort')}</section>`;
   }
   if (s.stage === 'review') {
     return `<section class="card">${steps(labels, 0)}
-      <h2>Sign this message?</h2>
-      ${messageBlock(s.msg)}${tweakList(s.tweaks)}${key}
-      ${s.msg.text === null ? '<div class="note warn">These are opaque bytes. Approve only if you know what they stand for.</div>' : ''}
+      <h2>${item ? `Sign input ${item.input + 1} of this transaction?` : 'Sign this message?'}</h2>
+      ${what}
+      ${!item && !isSighashMessage(s.msg.hex) && s.msg.text === null ? '<div class="note warn">These are opaque bytes. Approve only if you know what they stand for.</div>' : ''}
+      ${item ? '<div class="note">Check the addresses and amounts against what you expect to pay, on a channel other than the one this request came through.</div>' : ''}
       <div class="row"><button class="btn primary" data-act="do" data-op="p_sign_approve">Approve and create nonce</button>
       <button class="btn quiet" data-act="do" data-op="p_sign_abort">Reject</button></div>
     </section>`;
@@ -550,7 +697,7 @@ function viewSignParticipant() {
       <button class="btn danger quiet" data-act="do" data-op="p_sign_abort">Abort</button></div>
       <div class="note warn">Keep this tab open. The secret nonce lives only in memory and is used exactly once; if the tab is closed, ask the coordinator for a new request.</div>
     </section>
-    <section class="card flat"><details data-keep ${ui.msgOpen ? 'open' : ''}><summary>What you approved</summary>${messageBlock(s.msg)}${tweakList(s.tweaks)}${key}</details></section>`;
+    <section class="card flat"><details data-keep ${ui.msgOpen ? 'open' : ''}><summary>What you approved</summary>${what}</details></section>`;
   }
   return `<section class="card">${steps(labels, 3)}
       <h2>Send your partial signature to the coordinator</h2>
@@ -558,7 +705,55 @@ function viewSignParticipant() {
       ${outBox(s.out)}
       <div class="row"><button class="btn" data-act="do" data-op="p_sign_abort">Done</button></div>
     </section>
-    <section class="card flat"><details data-keep ${ui.msgOpen ? 'open' : ''}><summary>What you signed</summary>${messageBlock(s.msg)}${tweakList(s.tweaks)}${key}</details></section>`;
+    <section class="card flat"><details data-keep ${ui.msgOpen ? 'open' : ''}><summary>What you signed</summary>${what}</details></section>`;
+}
+
+// The coordinator's view of a transaction: what it is, the signers' copy of
+// it, and its inputs, each to be signed in a session of its own.
+function viewTransaction(g) {
+  const tx = loadedTx();
+  const head = `<div class="head"><h2>Transaction</h2><button class="btn mini" data-act="confirm" data-op="psbt-clear" data-ask="Forget this transaction and the signatures collected for it?">Forget</button></div>`;
+  if (tx.error || !tx.items.length) return `<section class="card">${head}${txBlock(tx)}</section>`;
+  const signed = Object.keys(ui.psbt.signatures).length;
+  const name = `frost-tx-${tx.items[0].digest.slice(0, 8)}`;
+  const psbtOut = (bytes, note) => outBox({
+    data: toBase64(bytes),
+    name,
+    qr: (density) => psbtToUr(bytes, { low: 70, mid: 150, high: 320 }[density]),
+    file: { name: `${name}.psbt`, bytes, type: 'application/octet-stream' },
+    note,
+  });
+  const inputs = `<ul class="lines">${tx.items.map((item) => {
+    const done = item.input in ui.psbt.signatures;
+    return `<li><div class="grow"><span>Input ${item.input + 1}</span><span class="muted small mono">${esc(tx.inputs[item.input].address)}</span></div>
+      <div class="amount">${done ? '<span class="chip good">signed</span>' : `<button class="btn mini ${signed === tx.items.indexOf(item) ? 'primary' : ''}" data-act="psbt-sign" data-input="${item.input}">Sign this input</button>`}</div></li>`;
+  }).join('')}</ul>`;
+  if (signed < tx.items.length) {
+    return `<section class="card">${head}${txBlock(tx)}</section>
+      <section class="card">
+        <h2>Give the transaction to the signers</h2>
+        <p class="muted small">Every signer loads it on their own device, so that each signing request can be shown with what the transaction pays. In the UR format that wallets use.</p>
+        ${psbtOut(ui.psbt.bytes)}
+      </section>
+      <section class="card">
+        <div class="head"><h2>Sign the inputs</h2><span class="chip ${signed ? 'good' : ''}">${signed} of ${tx.items.length} signed</span></div>
+        <p class="muted small">Each input is signed in a signing session of its own, with ${g.t} of the ${g.n} participants.</p>
+        ${inputs}
+      </section>`;
+  }
+  const result = signedTx();
+  if (result.error) return `<section class="card">${head}<div class="note danger"><b>The signatures could not be put into the transaction.</b> ${esc(result.error)}</div></section>`;
+  return `<section class="card">${head}
+      <div class="verdict good">${ICON.ok}<span>${result.complete ? 'Transaction signed' : 'Your inputs are signed'}</span></div>
+      ${result.complete
+        ? `<dl class="kv">${kv('Transaction id', result.txid)}</dl>
+           <p class="muted small">Take the signed PSBT back to your watch-only wallet to broadcast it, or broadcast the raw transaction below yourself.</p>`
+        : '<div class="note warn">Other inputs of this transaction belong to other wallets and still need their signatures. Pass the PSBT on to them.</div>'}
+      <h3>Signed PSBT</h3>
+      ${psbtOut(result.psbt, 'In the UR format that Sparrow and other wallets scan.')}
+      ${result.complete ? `<h3>Raw transaction</h3><dl class="kv">${kv('Hex, ready to broadcast', result.tx)}</dl>` : ''}
+    </section>
+    <section class="card flat"><details><summary>The transaction</summary>${txBlock(tx)}</details></section>`;
 }
 
 function viewSignCoordinator() {
@@ -569,11 +764,24 @@ function viewSignCoordinator() {
       <div class="row"><button class="btn primary" data-act="tab" data-tab="keygen">Key generation</button>
       ${importBtn('Import recovery data', 'Import the recovery data of the group.', false)}</div></section>`;
   }
-  const labels = ['Message', 'Nonces', 'Partial signatures', 'Signature'];
+  const item = s ? requestedInput(s) : null;
+  const labels = [item ? `Input ${item.input + 1}` : 'Message', 'Nonces', 'Partial signatures', 'Signature'];
   if (!s) {
     const d = ui.draft;
-    return `<section class="card">${steps(labels, 0)}
-      <h2>What should be signed?</h2>
+    const modeSeg = [['message', 'Message'], ['psbt', 'Bitcoin transaction']]
+      .map(([id, label]) => `<button data-act="sign-mode" data-mode="${id}" aria-pressed="${ui.signMode === id}">${label}</button>`).join('');
+    const head = `<div class="head"><h2>What should be signed?</h2><div class="seg">${modeSeg}</div></div>`;
+    if (ui.signMode === 'psbt') {
+      if (ui.psbt.bytes) return `<section class="card">${head}</section>${viewTransaction(g)}`;
+      return `<section class="card">${head}
+        <div class="field"><span class="label">Transaction (PSBT), as base64 or hex</span>
+          <textarea rows="4" class="mono" data-bind="psbt.text" placeholder="cHNidP8B… or 70736274ff…" spellcheck="false" autocomplete="off" autocapitalize="off">${esc(ui.psbt.text)}</textarea></div>
+        <div class="row"><button class="btn primary" data-act="psbt-inspect">Inspect</button>
+          ${importBtn('Scan QR or open file', 'Scan the PSBT QR code from your wallet (single or animated), or open a .psbt file.', false, 'psbt')}</div>
+        <p class="muted small">Build the transaction in a watch-only wallet set up with this key's descriptor (Bitcoin tab), and bring its PSBT here.</p>
+      </section>`;
+    }
+    return `<section class="card">${steps(labels, 0)}${head}
       ${messageInput('draft')}
       <details ${d.tweaks ? 'open' : ''}><summary>Advanced: key tweaks</summary>
         <div class="field"><span class="label">One per line, applied in order: <span class="mono">plain:&lt;32-byte hex&gt;</span> (BIP32) or <span class="mono">xonly:&lt;32-byte hex&gt;</span> (Taproot)</span>
@@ -584,8 +792,7 @@ function viewSignCoordinator() {
     <section class="card flat"><p class="small muted">Signing with the ${g.t}-of-${g.n} group key <span class="mono">${esc(g.fp)}</span>. The result is a BIP340 Schnorr signature over the SHA-256 digest of the message.</p></section>`;
   }
   const abort = `<button class="btn danger quiet" data-act="confirm" data-op="c_sign_abort" data-ask="Abort this signing session?">Abort</button>`;
-  const what = `<section class="card flat"><details data-keep ${ui.msgOpen ? 'open' : ''}><summary>Message being signed</summary>${messageBlock(s.msg)}${tweakList(s.tweaks)}
-    <dl class="kv">${kv('Verifies under (x-only)', s.key)}</dl></details></section>`;
+  const what = `<section class="card flat"><details data-keep ${ui.msgOpen ? 'open' : ''}><summary>${item ? 'Transaction input' : 'Message'} being signed</summary>${sessionBlock(s)}</details></section>`;
   const chips = (ids, have) => `<div class="row">${ids.map((i) => `<span class="chip ${have.includes(i) ? 'good' : ''}">${no(i)} ${have.includes(i) ? 'received' : 'waiting'}</span>`).join('')}</div>`;
   if (s.stage === 'failed') {
     return `<section class="card"><h2>Signing</h2>${failure(s.error, 'c_sign_abort')}</section>${what}`;
@@ -594,7 +801,7 @@ function viewSignCoordinator() {
     const enough = s.nonces.length >= g.t;
     return `<section class="card">${steps(labels, 1)}
       <h2>Send the signing request to the signers</h2>
-      <p class="muted small">At least ${g.t} of the ${g.n} participants have to answer.</p>
+      <p class="muted small">At least ${g.t} of the ${g.n} participants have to answer.${item ? ' They need the transaction on their device too, to see what this request signs.' : ''}</p>
       ${outBox(s.request)}
     </section>
     <section class="card">
@@ -692,7 +899,7 @@ function viewVerify() {
 // ---------------------------------------------------------------- render
 
 function tabsFor(role) {
-  const tabs = [['keygen', '<span class="wide">Key generation</span><span class="narrow">Keygen</span>'], ['sign', 'Sign'], ['backup', 'Backup'], ['verify', 'Verify']];
+  const tabs = [['keygen', '<span class="wide">Key generation</span><span class="narrow">Keygen</span>'], ['sign', 'Sign'], ['verify', 'Verify'], ['bitcoin', 'Bitcoin'], ['backup', 'Backup']];
   return role === 'participant' ? [['identity', 'Identity'], ...tabs] : tabs;
 }
 
@@ -721,6 +928,7 @@ function render() {
       identity: viewIdentity,
       keygen: participant ? viewKeygenParticipant : viewKeygenCoordinator,
       sign: participant ? viewSignParticipant : viewSignCoordinator,
+      bitcoin: viewBitcoin,
       backup: viewBackup,
       verify: viewVerify,
     }[ui.tab];
@@ -749,9 +957,10 @@ function mountOut(el) {
     body = `<textarea class="mono" rows="4" readonly spellcheck="false">${esc(out.data)}</textarea>
       <div class="row"><button class="btn" data-act="copy" data-val="${esc(out.data)}">Copy text</button><span class="muted small">${out.data.length} characters</span></div>`;
   } else if (mode === 'file') {
-    body = `<div class="filebox"><span class="mono">${esc(out.name)}.txt</span><button class="btn" data-act="download">Save file</button></div>`;
+    body = `<div class="filebox"><span class="mono">${esc(out.file?.name ?? `${out.name}.txt`)}</span><button class="btn" data-act="download">Save file</button></div>`;
   } else {
-    const parts = qrParts(out.data);
+    // A payload for another wallet brings its own QR format.
+    const parts = out.qr ? out.qr(ui.density) : qrParts(out.data);
     const sizes = [['low', 'Coarse'], ['mid', 'Normal'], ['high', 'Dense']]
       .map(([id, label]) => `<button data-act="density" data-density="${id}" aria-pressed="${ui.density === id}">${label}</button>`)
       .join('');
@@ -760,7 +969,8 @@ function mountOut(el) {
         ? `<button class="btn mini" data-act="qr-prev" aria-label="Previous part">◀</button><span class="count"></span>
            <button class="btn mini" data-act="qr-next" aria-label="Next part">▶</button><button class="btn mini" data-act="qr-pause">Pause</button>`
         : ''}<div class="seg" title="How much data goes into one QR code">${sizes}</div></div>
-      ${parts.length > 1 ? `<p class="muted small" style="text-align:center">Animated sequence of ${parts.length} codes. The scanner collects them in any order.</p>` : ''}`;
+      ${parts.length > 1 ? `<p class="muted small" style="text-align:center">Animated sequence of ${parts.length} codes. The scanner collects them in any order.</p>` : ''}
+      ${out.note ? `<p class="muted small" style="text-align:center">${esc(out.note)}</p>` : ''}`;
     el.qr = { parts, index: 0, paused: false };
   }
   el.innerHTML = `<div class="out-head"><div class="seg">${seg('qr', 'QR code')}${seg('text', 'Text')}${seg('file', 'File')}</div>${
@@ -882,16 +1092,53 @@ function ingest(text) {
     if (sheet.done.has(id)) return { ignored: true };
     if (!sheet.asm || sheet.asm.id !== id || sheet.asm.n !== n) sheet.asm = { id, n, chunks: new Map() };
     sheet.asm.chunks.set(i, chunk);
-    if (sheet.asm.chunks.size < n) return { partial: true, got: sheet.asm.chunks.size, n };
+    if (sheet.asm.chunks.size < n) return { partial: true, progress: sheet.asm.chunks.size / n, label: `Collected ${sheet.asm.chunks.size} of ${n} codes…` };
     text = Array.from({ length: n }, (_, k) => sheet.asm.chunks.get(k + 1)).join('');
     sheet.asm = null;
     const result = call({ op: 'import', data: text });
     sheet.done.add(id);
     return result;
   }
+  // A transaction from another wallet: as UR codes, or as plain base64 or hex.
+  if (isUr(text)) {
+    sheet.ur ??= new UrReader();
+    const progress = sheet.ur.receive(text);
+    if (progress < 1) return { partial: true, progress, label: `Collecting the transaction… ${Math.round(progress * 100)}%` };
+    const psbt = sheet.ur.result;
+    sheet.ur = null;
+    return loadPsbt(psbt);
+  }
+  const psbt = psbtFromText(text);
+  if (psbt) return loadPsbt(psbt);
+  if (sheet.target === 'psbt') throw new Error('This is not a transaction (PSBT).');
   const result = call({ op: 'import', data: text });
   sheet.seen.add(text);
   return result;
+}
+
+// Takes a transaction in. The coordinator has its inputs signed from the
+// Sign tab. A participant can only enter one for the signing request in
+// front of them, through that request's own field, and only if it is the
+// transaction the request belongs to.
+function loadPsbt(bytes) {
+  if (!S.role) throw new Error('Choose a role first.');
+  if (S.role === 'participant') {
+    if (!S.sign) throw new Error('This is a transaction (PSBT). Import the signing request first; the transaction is entered after it, in its own field.');
+    if (sheet.open && sheet.target !== 'psbt') throw new Error('This is a transaction (PSBT). Enter it in the transaction field of the signing request, on the Sign tab.');
+    const tx = readTx(toBase64(bytes));
+    if (tx.error) throw new Error(tx.error);
+    const item = matchInput(tx, S.sign);
+    if (!item) throw new Error('This is not the transaction of this request: none of its inputs has the signature hash and key that the request asks to sign.');
+    ui.psbt = { ...newPsbt(), bytes };
+    return { tab: 'sign', more: false, message: `It is the transaction of this request, which signs its input ${item.input + 1}.` };
+  }
+  if (!S.group) throw new Error('Load the group key first: run key generation or restore the recovery data.');
+  if (S.sign || Object.keys(ui.psbt.signatures).length) {
+    throw new Error('Something is being signed already. Finish or abort it, and forget the transaction in progress, before loading another.');
+  }
+  ui.signMode = 'psbt';
+  ui.psbt = { ...newPsbt(), bytes };
+  return { tab: 'sign', more: false, message: 'Transaction loaded. Inspect it, then sign its inputs.' };
 }
 
 function sheetIngest(text) {
@@ -906,11 +1153,12 @@ function sheetIngest(text) {
   }
   if (result.ignored) return;
   if (result.partial) {
-    sheetStatus('', `Collected ${result.got} of ${result.n} codes…`, result.got / result.n);
+    sheetStatus('', result.label, result.progress);
     return;
   }
   ui.tab = result.tab;
   forgetRevealed();
+  collectSignature();
   render();
   if (result.more) {
     sheetStatus('good', `${result.message} Ready for the next one.`);
@@ -933,12 +1181,14 @@ function sheetStatus(kind, text, progress) {
   }`;
 }
 
-function openSheet(hint) {
+function openSheet(hint, target) {
   sheet.open = true;
   sheet.hint = hint || '';
+  sheet.target = target || '';
   sheet.seen = new Set();
   sheet.done = new Set();
   sheet.asm = null;
+  sheet.ur = null;
   drawSheet();
 }
 
@@ -979,17 +1229,37 @@ function drawSheet() {
   if (sheet.mode === 'paste') $('#paste').focus();
 }
 
+// Why the camera could not be started, and what to do about it.
+function cameraProblem(error) {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    return 'This browser does not let a page opened this way use the camera. It allows it on https pages and on localhost; some browsers also refuse it for files opened from disk.';
+  }
+  switch (error.name) {
+    case 'NotAllowedError':
+    case 'SecurityError':
+      return 'Camera access was refused. Allow it when the browser asks (or through the camera icon in the address bar), and check that the system lets this browser use the camera: on macOS, System Settings → Privacy & Security → Camera.';
+    case 'NotFoundError':
+    case 'OverconstrainedError':
+      return 'No camera was found on this device.';
+    case 'NotReadableError':
+    case 'AbortError':
+      return 'The camera could not be opened. Another application may be using it; close it and try again.';
+    default:
+      return `The camera is not available (${error.name}).`;
+  }
+}
+
 async function startCamera() {
   const finder = $('.viewfinder');
   const video = $('video', finder);
   try {
-    if (!navigator.mediaDevices?.getUserMedia) throw new Error('not supported on this page');
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error('unsupported');
     cam.stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
       video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
     });
   } catch (error) {
-    sheetStatus('warn', `The camera is not available (${error.name === 'Error' ? error.message : error.name}). Take a photo of the code instead, or use text or a file.`);
+    sheetStatus('warn', `${cameraProblem(error)} Meanwhile, "Take a photo instead" below, or text or a file, work without it.`);
     return;
   }
   if (!finder.isConnected) return stopCamera();
@@ -1073,7 +1343,7 @@ async function readPayloads(file) {
     }
     throw new Error(`No QR code found in ${file.name}. Try a sharper, closer photo.`);
   }
-  if (MAGIC.every((b, i) => bytes[i] === b)) return [toBase64(bytes)];
+  if (MAGIC.every((b, i) => bytes[i] === b) || isPsbt(bytes)) return [toBase64(bytes)];
   if (bytes.length > 4 * 1048576) throw new Error(`${file.name} is not a FROST wallet message.`);
   return [dec.decode(bytes)];
 }
@@ -1094,6 +1364,7 @@ async function importFiles(files) {
 
 function run(req) {
   call(req);
+  collectSignature();
   render();
 }
 
@@ -1132,6 +1403,10 @@ const actions = {
     ui.draft = newDraft();
     ui.verify = { ...newDraft(), pubkey: '', sig: '' };
     ui.entropy = newEntropy();
+    ui.psbt = newPsbt();
+    ui.signMode = 'message';
+    ui.address = { chain: 0, index: 0 };
+    ui.walletQr = null;
     run({ op: 'reset' });
   },
   tab: (el) => {
@@ -1147,7 +1422,10 @@ const actions = {
     run(req);
   },
   confirm: (el) => {
-    if (confirm(el.dataset.ask)) actions.do(el);
+    if (!confirm(el.dataset.ask)) return;
+    // Either an operation of the core, or another action of the page.
+    if (actions[el.dataset.op]) actions[el.dataset.op](el);
+    else actions.do(el);
   },
   'new-host': () => {
     const { device, strokes, dice, coins } = ui.entropy;
@@ -1175,7 +1453,7 @@ const actions = {
     } else e[el.dataset.kind] = '';
     render();
   },
-  import: (el) => openSheet(el.dataset.hint),
+  import: (el) => openSheet(el.dataset.hint, el.dataset.target),
   'dkg-start': () => {
     const input = $('[data-bind="t"]');
     run({ op: 'c_dkg_start', t: Number(input?.value) });
@@ -1211,6 +1489,45 @@ const actions = {
     run({ op: 'c_sign_start', msg: toHex(bytes), tweaks: parseTweaks(draft.tweaks) });
     ui.draft = { ...newDraft(), mode: draft.mode };
   },
+  'sign-mode': (el) => {
+    ui.signMode = el.dataset.mode;
+    render();
+  },
+  'psbt-inspect': () => {
+    const bytes = psbtFromText(ui.psbt.text);
+    if (!bytes) throw new Error('This is not a PSBT. Paste it as base64 or hex, or scan or open it.');
+    if (S.role === 'participant') toast(loadPsbt(bytes).message);
+    else ui.psbt = { ...newPsbt(), bytes };
+    render();
+  },
+  'psbt-clear': () => {
+    ui.psbt = newPsbt();
+    render();
+  },
+  // One input is signed as one ordinary message: the message whose SHA-256
+  // is the input's signature hash, under the key the input's coin belongs to.
+  'psbt-sign': (el) => {
+    const input = Number(el.dataset.input);
+    const item = loadedTx().items.find((candidate) => candidate.input === input);
+    run({ op: 'c_sign_start', msg: item.message, tweaks: item.tweaks });
+    ui.psbt.pending = input;
+  },
+  network: (el) => {
+    ui.network = el.dataset.network;
+    render();
+  },
+  'address-chain': (el) => {
+    ui.address = { chain: Number(el.dataset.chain), index: 0 };
+    render();
+  },
+  'address-step': (el) => {
+    ui.address.index = Math.max(0, ui.address.index + Number(el.dataset.step));
+    render();
+  },
+  'wallet-qr': (el) => {
+    ui.walletQr = ui.walletQr === el.dataset.qr ? null : el.dataset.qr;
+    render();
+  },
   // Carries the finished signature over to the Verify tab and checks it there.
   'verify-signed': () => {
     const { msg, signature } = S.sign;
@@ -1244,7 +1561,8 @@ const actions = {
   },
   download: (el) => {
     const { out } = outs[el.closest('.out').dataset.out];
-    download(out.name, out.data);
+    if (out.file) saveFile(out.file.name, out.file.bytes, out.file.type);
+    else download(out.name, out.data);
   },
   'download-page': () => saveFile('frost-wallet.html', PAGE_SOURCE, 'text/html'),
   'out-mode': (el) => {
@@ -1343,7 +1661,7 @@ for (const type of ['online', 'offline']) {
   window.addEventListener(type, () => {
     // Re-rendering would restart a running camera view only if the sheet were
     // part of the app root; it is not, so this is safe at any time.
-    if (wasm) render();
+    if (core) render();
   });
 }
 

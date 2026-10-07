@@ -1,9 +1,10 @@
 # FROST Wallet
 
 An offline threshold wallet in one HTML file. It generates a FROST threshold key with
-[ChillDKG](https://github.com/olegfomenko/chilldkg), backs it up, and produces BIP340 Schnorr
-signatures over arbitrary data. There is no server and no networking: every protocol message
-is carried between devices by hand, as a QR code, a text string or a file.
+[ChillDKG](https://github.com/olegfomenko/chilldkg), backs it up, and signs with it: arbitrary
+messages, and Bitcoin transactions (PSBTs) spending from the key's Taproot addresses. There is
+no server and no networking: every protocol message is carried between devices by hand, as a
+QR code, a text string or a file.
 
 ⚠️ Neither this wallet nor the `chilldkg-rs` library underneath has been audited. Use at your
 own risk.
@@ -20,13 +21,16 @@ the stylesheet, into `dist/frost-wallet.html`. That file is the whole applicatio
 any device and open it in a browser.
 
 You need Node 20 or later and the Rust toolchain pinned in `rust-toolchain.toml` (it installs
-the `wasm32-unknown-unknown` target on first use). The page has two runtime JavaScript
-dependencies, both for QR codes: [uqr](https://github.com/unjs/uqr) draws them and
-[jsQR](https://github.com/cozmo/jsQR) reads them. [esbuild](https://esbuild.github.io)
-bundles the script, unminified. All three are pinned to exact versions.
+the `wasm32-unknown-unknown` target on first use). The page's runtime JavaScript
+dependencies are [uqr](https://github.com/unjs/uqr) and [jsQR](https://github.com/cozmo/jsQR)
+for drawing and reading QR codes, and, for Bitcoin,
+[@scure/btc-signer](https://github.com/paulmillr/scure-btc-signer) with the
+[noble](https://paulmillr.com/noble/) curve and hash libraries it builds on.
+[esbuild](https://esbuild.github.io) bundles the script, unminified. All are pinned to exact
+versions.
 
 ```bash
-npm test    # Rust: full keygen, signing and backup sessions; JavaScript: QR round trips
+npm test
 ```
 
 `dist/` is not committed. `.github/workflows/build.yml` builds the page from the sources on
@@ -34,7 +38,7 @@ every commit, with no build cache, runs the tests and attaches `frost-wallet.htm
 as an artifact. Commits to the default branch are also published to GitHub Pages (enable it
 once under *Settings → Pages → Source: GitHub Actions*), together with `SHA256SUMS.txt`.
 
-The page has a **Download this page** button in its footer. It saves an exact copy of the
+The page has a **Download** button in its header. It saves an exact copy of the
 page as it was served, to carry to an offline device.
 
 ## Using it
@@ -73,9 +77,44 @@ signature over that 32-byte digest, under the group's x-only key (or under a twe
 BIP32/Taproot tweaks were given). The **Verify** tab takes the raw message the same way and
 hashes it before checking.
 
-Because of the extra hash, a signature made here is not a signature over the message bytes
-themselves. In particular the wallet cannot sign a precomputed digest such as a Bitcoin
-Taproot sighash as is.
+Because of the extra hash, a signature over a message is not a signature over the message
+bytes themselves, and a message session cannot be used to sign a precomputed digest. Bitcoin
+transactions are signed through their own kind of session, below.
+
+### Bitcoin
+
+The **Bitcoin** tab turns the group key into a wallet:
+
+- an **extended public key** and an output **descriptor**, `tr(xpub/<0;1>/*)`, each with a QR
+  code, to import into Sparrow, Bitcoin Core or another wallet as watch-only;
+- the Taproot **addresses** below it, with QR codes: `m/0/*` for receiving, `m/1/*` for change.
+
+Addresses are BIP 32 children of the group key, spent by key path only (as in BIP 86). A
+threshold key has no chain code of its own, so the xpub uses the fixed one that BIP 328
+defines for aggregate keys.
+
+To spend, build the transaction in the watch-only wallet and bring its PSBT to the
+coordinator's **Sign** tab, as a QR code (the UR format wallets show, single or animated), a
+`.psbt` file, or base64 or hex text. The coordinator sees what it pays, hands the same PSBT
+on to the signers, and has its inputs signed **one at a time**, each in an ordinary signing
+session as in the table above. When every input is signed, the signed PSBT and the raw
+transaction are ready, to take back to the watch-only wallet as a QR code, text or file.
+
+The core knows nothing about Bitcoin and is not changed for it. It signs the SHA-256 of a
+message; the signature hash of a Taproot input is the SHA-256 of a message too (BIP 341's
+tagged hash), so the page gives the core exactly that message, with the tweaks that lead from
+the group key to the key of the coin. All Bitcoin code is JavaScript, in `web/bitcoin.js`.
+
+A signing request therefore carries that message, which does not say what the transaction
+pays. So once a signer has imported such a request, an **Add the transaction** button lets
+them give the page the transaction itself (as text, a QR code or a file). This is optional.
+The transaction is accepted only if it is the one the request belongs to, matched by signature
+hash and key, and the request is then shown as "input 2 of this transaction" with the
+outputs, change and fee. Approving without it is signing blind. A participant cannot enter a
+transaction anywhere else, or before a request.
+
+What it does not do: script-path spends, signature types other than the default (all of the
+transaction), hardened derivation, and reading PSBTs in the BBQr QR format.
 
 ### Backups
 
@@ -107,7 +146,8 @@ ChillDKG reference (`transcript || cert`).
   (encoding of the blobs), `ffi.rs` (the WebAssembly boundary). It holds every secret and
   decides what reaches the ChillDKG and FROST drivers.
 - `web/` — the page: `index.html`, `app.css`, `app.js` (the interface and all input and
-  output), `qr.js` (QR codes).
+  output), `core.js` (the bridge to the WebAssembly core), `qr.js` (QR codes), `bitcoin.js`
+  (xpub, addresses, reading and completing PSBTs), `ur.js` (the QR format for PSBTs).
 - `scripts/build.mjs` — the build step that produces the single file.
 - `test/` — JavaScript tests; the Rust ones are in `core/tests/`.
 

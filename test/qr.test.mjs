@@ -44,6 +44,21 @@ test('a part of an animated sequence survives too', () => {
   assert.deepEqual(decodeQr(rgba, side, side), [text]);
 });
 
+test('codes in the format other wallets use for transactions survive too', async () => {
+  const { psbtToUr } = await import('../web/ur.js');
+  const psbt = Uint8Array.from({ length: 900 }, (_, i) => (i * 131 + 7) % 256);
+  for (const size of [70, 150, 320]) {
+    for (const part of psbtToUr(psbt, size)) {
+      const symbol = encodeQr(part);
+      // Upper-case text is stored compactly: the symbol is smaller than
+      // the same text in lower case.
+      assert.ok(symbol.width < encodeQr(part.toLowerCase()).width);
+      const { rgba, side } = rasterise(symbol, 3);
+      assert.deepEqual(decodeQr(rgba, side, side), [part]);
+    }
+  }
+});
+
 test('an image without a code yields nothing', () => {
   assert.deepEqual(decodeQr(new Uint8ClampedArray(200 * 200 * 4).fill(255), 200, 200), []);
 });
