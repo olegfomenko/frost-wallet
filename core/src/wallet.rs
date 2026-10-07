@@ -19,6 +19,7 @@ use base64::engine::general_purpose::STANDARD;
 use chilldkg_rs::crypto::ec::{
     compress_default, compress_point_bip340, decompress_default, parse_secret_scalar_from_bytes,
 };
+use chilldkg_rs::crypto::tagged_hasher;
 use chilldkg_rs::dkg::msg::{
     CoordinatorDKGOutput, DKGOutput, ParticipantMsg1, ParticipantMsg2, RecoveryData,
 };
@@ -29,6 +30,13 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use zeroize::Zeroizing;
+
+/// Domain separation of the hash that mixes user entropy into a host key.
+const TAG_HOST_KEY: &str = "frost-wallet/host-key";
+/// What dice and coins must add up to when a host key is made without device
+/// randomness. The host public key is published in the recovery data, so a
+/// guessable host key would give away the key share.
+const MIN_USER_ENTROPY_BITS: usize = 128;
 
 /// Source of randomness, supplied by the host environment.
 pub type Rng = Box<dyn FnMut(&mut [u8])>;
@@ -294,7 +302,43 @@ impl Wallet {
                 if p.host.is_some() {
                     return Err("A host key is already loaded.".into());
                 }
-                p.host = Some(random_scalar(&mut self.rng));
+                let device = req["device"].as_bool().unwrap_or(true);
+                let dice = Zeroizing::new(req["dice"].as_str().unwrap_or_default().to_string());
+                let coins = Zeroizing::new(req["coins"].as_str().unwrap_or_default().to_string());
+                // The drawing: x, y and time of every point, one after another.
+                let drawing: Zeroizing<Vec<f64>> = Zeroizing::new(
+                    req["drawing"]
+                        .as_array()
+                        .map(Vec::as_slice)
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|v| v.as_f64().filter(|f| f.is_finite()))
+                        .collect::<Option<_>>()
+                        .filter(|points: &Vec<f64>| points.len().is_multiple_of(3))
+                        .ok_or("Malformed drawing data.")?,
+                );
+                if !dice.bytes().all(|b| (b'1'..=b'6').contains(&b))
+                    || !coins.bytes().all(|b| b == b'H' || b == b'T')
+                {
+                    return Err("Malformed dice rolls or coin flips.".into());
+                }
+                // A roll is worth log2(6) = 2.58 bits, a flip one. A drawing
+                // cannot be measured, so it counts for nothing.
+                let bits = dice.len() * 2584 / 1000 + coins.len();
+                if !device && bits < MIN_USER_ENTROPY_BITS {
+                    return Err(format!(
+                        "Without this device's randomness the key rests on your dice and coins alone, and they must add up to {MIN_USER_ENTROPY_BITS} bits: you have {bits}. That takes 50 rolls, {MIN_USER_ENTROPY_BITS} flips, or a mix; a drawing does not count."
+                    ));
+                }
+                let drawing: Zeroizing<Vec<u8>> =
+                    Zeroizing::new(drawing.iter().flat_map(|v| v.to_be_bytes()).collect());
+                let rng = device.then_some(&mut self.rng);
+                p.host = Some(host_scalar(
+                    rng,
+                    dice.as_bytes(),
+                    coins.as_bytes(),
+                    &drawing,
+                ));
             }
             "p_forget_host" => {
                 if p.dkg.as_ref().is_some_and(|d| d.stage.is_running()) {
@@ -1217,15 +1261,44 @@ fn random_bytes(rng: &mut Rng) -> Zeroizing<[u8; 32]> {
     bytes
 }
 
-/// Samples a uniformly random non-zero scalar by rejection.
-fn random_scalar(rng: &mut Rng) -> Zeroizing<Scalar> {
-    loop {
-        if let Ok(scalar) = parse_secret_scalar_from_bytes(random_bytes(rng))
+/// Makes a host key: the hash of what the user added (dice rolls, coin flips,
+/// a drawing), XORed with fresh device randomness when `rng` is given.
+///
+/// The XOR of two independent values is at least as hard to guess as the
+/// better of them, so poor user input cannot weaken a key that has device
+/// randomness in it, and good input covers for a weak random number
+/// generator. With nothing added the key is the device randomness alone.
+/// Without `rng` it is a function of the user input alone: the same input
+/// always gives the same key.
+fn host_scalar(
+    mut rng: Option<&mut Rng>,
+    dice: &[u8],
+    coins: &[u8],
+    drawing: &[u8],
+) -> Zeroizing<Scalar> {
+    // A value that is not a valid non-zero scalar is astronomically
+    // unlikely; the counter makes the next attempt differ even then.
+    for counter in 0u32.. {
+        let mut hasher = tagged_hasher(TAG_HOST_KEY);
+        for part in [dice, coins, drawing] {
+            hasher.update((part.len() as u64).to_be_bytes());
+            hasher.update(part);
+        }
+        hasher.update(counter.to_be_bytes());
+        let mut bytes: Zeroizing<[u8; 32]> = Zeroizing::new(hasher.finalize().into());
+        if let Some(rng) = rng.as_mut() {
+            let random = random_bytes(rng);
+            for (byte, r) in bytes.iter_mut().zip(random.iter()) {
+                *byte ^= r;
+            }
+        }
+        if let Ok(scalar) = parse_secret_scalar_from_bytes(bytes)
             && !bool::from(scalar.is_zero())
         {
             return Zeroizing::new(scalar);
         }
     }
+    unreachable!("a valid scalar is found long before the counter runs out")
 }
 
 fn host_pubkey(secret: &Scalar) -> ProjectivePoint {

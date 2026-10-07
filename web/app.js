@@ -23,6 +23,7 @@ const dec = new TextDecoder();
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const no = (idx) => `#${idx + 1}`;
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 let wasm = null;
 let S = { role: null };
@@ -34,6 +35,13 @@ const qrCache = new Map();
 const MODES = [['text', 'Text'], ['hex', 'Hex'], ['base64', 'Base64']];
 const newDraft = () => ({ mode: 'text', value: '', tweaks: '' });
 
+// Randomness the user adds to a new host key: strokes of a drawing as flat
+// [x, y, time, ...] lists, dice rolls as digits, coin flips as H and T.
+// `device` is whether the browser's random bytes go into the key as well.
+const newEntropy = () => ({ device: true, strokes: [], points: 0, dice: '', coins: '' });
+// What dice and coins must add up to when they are the only source.
+const MIN_ENTROPY_BITS = 128;
+
 const ui = {
   tab: null,
   outMode: 'qr',
@@ -44,6 +52,7 @@ const ui = {
   msgOpen: false,
   draft: newDraft(),
   verify: { ...newDraft(), pubkey: '', sig: '' },
+  entropy: newEntropy(),
 };
 
 const sheet = { open: false, mode: 'paste', hint: '', seen: new Set(), done: new Set(), asm: null };
@@ -234,9 +243,10 @@ function viewIdentity() {
     return `<section class="card">
       <h2>Create your identity</h2>
       <p>A <b>host key</b> identifies this device during key generation, and later lets you recover your key share from public recovery data. Create it once and back it up.</p>
-      <div class="row"><button class="btn primary" data-act="do" data-op="p_new_host">Create host key</button>
+      <div class="row"><button class="btn primary" data-act="new-host">Create host key</button>
       ${importBtn('Restore from backup', 'Import a host secret key backup or a key share backup.', false)}</div>
-    </section>`;
+    </section>
+    ${entropyCard()}`;
   }
   return `<section class="card">
       <div class="head"><h2>Host key</h2><span class="chip accent">${esc(host.fp)}</span></div>
@@ -251,6 +261,128 @@ function viewIdentity() {
       'Together with the public recovery data, this key restores your share of every key it took part in. Anyone who gets it can do the same.')}
     <div class="row end"><button class="btn danger quiet" data-act="confirm" data-op="p_forget_host"
       data-ask="Forget the host key on this device? Without a backup it cannot be restored.">Forget host key</button></div>`;
+}
+
+const DIE_PIPS = { 1: [4], 2: [0, 8], 3: [0, 4, 8], 4: [0, 2, 6, 8], 5: [0, 2, 4, 6, 8], 6: [0, 2, 3, 5, 6, 8] };
+const dieFace = (n) =>
+  `<svg viewBox="0 0 40 40" aria-hidden="true"><rect x="3" y="3" width="34" height="34" rx="7" fill="none" stroke="currentColor" stroke-width="2"/>${
+    DIE_PIPS[n].map((cell) => `<circle cx="${11 + (cell % 3) * 9}" cy="${11 + Math.floor(cell / 3) * 9}" r="3" fill="currentColor"/>`).join('')
+  }</svg>`;
+const coinFace = (letter) =>
+  `<svg viewBox="0 0 40 40" aria-hidden="true"><circle cx="20" cy="20" r="16" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="20" cy="20" r="12" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="2 2.5"/><text x="20" y="25.5" text-anchor="middle" font-size="15" font-weight="700" fill="currentColor" font-family="system-ui, sans-serif">${letter}</text></svg>`;
+const grouped = (text) => text.replace(/(.{5})/g, '$1 ').trim();
+
+// Counted as the core counts them: a roll is worth 2.58 bits, a flip one.
+const entropyBits = (e) => Math.floor((e.dice.length * 2584) / 1000) + e.coins.length;
+
+// Optional sources of randomness for a new host key. Whatever is collected
+// is hashed together with the browser's random bytes by the core.
+function entropyCard() {
+  const e = ui.entropy;
+  // Counted as the core counts them: a roll is worth 2.58 bits, a flip one.
+  const bits = entropyBits(e);
+  const enough = bits >= MIN_ENTROPY_BITS;
+  const tally = (text, kind) => `<div class="row tally"><span class="mono grow">${text ? esc(grouped(text)) : '<span class="muted">nothing yet</span>'}</span>
+    <button class="btn mini" data-act="entropy-undo" data-kind="${kind}" ${text ? '' : 'disabled'}>Undo</button>
+    <button class="btn mini" data-act="entropy-clear" data-kind="${kind}" ${text ? '' : 'disabled'}>Clear</button></div>`;
+  return `<section class="card">
+    <div class="head"><h2>Add your own randomness</h2><span class="chip ${e.device ? '' : 'warn'}">${e.device ? 'optional' : 'required'}</span></div>
+      <div class="entropy">
+        <p class="small muted">${e.device
+          ? "The key is made from this device's random numbers. Anything you add here is mixed in with them, so it can only make the key harder to guess: use as much or as little as you like, then press <b>Create host key</b>."
+          : 'The key will be made <b>only</b> from what you add here.'}</p>
+        <label class="check"><input type="checkbox" data-bind="entropy.device" data-render ${e.device ? 'checked' : ''}><span>Use this device's randomness <span class="muted">— recommended. Turn it off only if you do not trust this device's random number generator.</span></span></label>
+        <div class="note ${enough ? 'good' : e.device ? '' : 'warn'}"><b>${bits} of ${MIN_ENTROPY_BITS} bits</b> from dice and coins${
+          enough ? ' — enough on their own.'
+            : e.device ? `. They are mixed with this device's randomness, so any amount helps; 50 rolls, ${MIN_ENTROPY_BITS} flips, or a mix would be enough on their own.`
+              : `. You need 50 rolls, ${MIN_ENTROPY_BITS} flips, or a mix.`} The drawing is mixed in too but is not counted, because it cannot be measured.
+          <div class="progress" style="margin-top:8px"><i style="width:${Math.min(100, Math.round((bits / MIN_ENTROPY_BITS) * 100))}%"></i></div>
+          ${e.device ? '' : '<p>The same rolls and flips always give the same key (unless you also draw), so a record of them is as secret as the key itself.</p>'}</div>
+
+        <div class="field"><div class="head"><span class="label">Draw anything</span><span class="chip" id="pad-count">${e.points} points</span>
+          <button class="btn mini" data-act="entropy-clear" data-kind="strokes" ${e.points ? '' : 'disabled'}>Clear</button></div>
+          <canvas class="pad" aria-label="Drawing area"></canvas>
+          <span class="muted small">Scribble with a finger or the mouse. The path and its timing are used.</span></div>
+
+        <div class="field"><div class="head"><span class="label">Dice rolls</span><span class="chip">${plural(e.dice.length, 'roll')}</span></div>
+          <div class="faces">${[1, 2, 3, 4, 5, 6].map((n) => `<button class="face" data-act="entropy-add" data-kind="dice" data-value="${n}" aria-label="Rolled ${n}">${dieFace(n)}</button>`).join('')}</div>
+          ${tally(e.dice, 'dice')}
+          <span class="muted small">Roll a real die and press what it shows, once per roll.</span></div>
+
+        <div class="field"><div class="head"><span class="label">Coin flips</span><span class="chip">${plural(e.coins.length, 'flip')}</span></div>
+          <div class="faces"><button class="face wide-face" data-act="entropy-add" data-kind="coins" data-value="H">${coinFace('H')}<span>Heads</span></button>
+            <button class="face wide-face" data-act="entropy-add" data-kind="coins" data-value="T">${coinFace('T')}<span>Tails</span></button></div>
+          ${tally(e.coins, 'coins')}
+          <span class="muted small">Flip a real coin and press the side it lands on, once per flip.</span></div>
+
+      </div>
+  </section>`;
+}
+
+// The drawing lives in ui.entropy, so the canvas is repainted from it after
+// every render.
+function mountPad() {
+  const pad = $('canvas.pad');
+  if (!pad) return;
+  const ratio = window.devicePixelRatio || 1;
+  const box = pad.getBoundingClientRect();
+  pad.width = Math.max(1, Math.round(box.width * ratio));
+  pad.height = Math.max(1, Math.round(box.height * ratio));
+  const ctx = pad.getContext('2d');
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  ctx.lineWidth = 2.5;
+  ctx.lineCap = ctx.lineJoin = 'round';
+  ctx.strokeStyle = getComputedStyle(pad).color;
+  for (const stroke of ui.entropy.strokes) {
+    ctx.beginPath();
+    ctx.moveTo(stroke[0], stroke[1]);
+    // A single tap is drawn as a dot.
+    if (stroke.length === 3) ctx.lineTo(stroke[0] + 0.1, stroke[1]);
+    for (let i = 3; i < stroke.length; i += 3) ctx.lineTo(stroke[i], stroke[i + 1]);
+    ctx.stroke();
+  }
+}
+
+let drawing = null;
+
+function padPoint(event) {
+  const e = ui.entropy;
+  if (!drawing) return;
+  const box = drawing.pad.getBoundingClientRect();
+  const x = Math.round((event.clientX - box.left) * 10) / 10;
+  const y = Math.round((event.clientY - box.top) * 10) / 10;
+  const { stroke } = drawing;
+  const ctx = drawing.pad.getContext('2d');
+  ctx.beginPath();
+  if (stroke.length) ctx.moveTo(stroke[stroke.length - 3], stroke[stroke.length - 2]);
+  else ctx.moveTo(x - 0.1, y);
+  ctx.lineTo(x, y);
+  ctx.stroke();
+  // The moment of each sample is as hard to predict as its position.
+  stroke.push(x, y, Math.round(event.timeStamp * 1000) / 1000);
+  e.points++;
+  $('#pad-count').textContent = `${e.points} points`;
+}
+
+document.addEventListener('pointerdown', (event) => {
+  const pad = event.target.closest?.('canvas.pad');
+  if (!pad) return;
+  event.preventDefault();
+  pad.setPointerCapture?.(event.pointerId);
+  drawing = { pad, stroke: [] };
+  ui.entropy.strokes.push(drawing.stroke);
+  padPoint(event);
+});
+document.addEventListener('pointermove', (event) => {
+  if (drawing) padPoint(event);
+});
+for (const type of ['pointerup', 'pointercancel']) {
+  document.addEventListener(type, () => {
+    if (!drawing) return;
+    drawing = null;
+    // Enables the Clear button and the "added" mark.
+    render();
+  });
 }
 
 function secretCard(what, title, text) {
@@ -595,16 +727,17 @@ function render() {
     body = `<main>${view()}</main>`;
   }
   $('#app').innerHTML = `<header class="top">
-      <div class="bar"><div class="brand">${ICON.logo}<span${S.role ? ' class="wide"' : ''}>FROST Wallet</span></div>${net}${
+      <div class="bar"><div class="brand">${ICON.logo}<span${S.role ? ' class="wide"' : ''}>FROST Wallet</span></div>${net}
+        <button class="btn mini" data-act="download-page" aria-label="Download this page" title="Save a copy of this page to open on an offline device">${ICON.down}<span class="wide">Download</span></button>${
         S.role ? `<span class="chip accent">${S.role === 'participant' ? 'Participant' : 'Coordinator'}</span>
         <button class="btn mini" data-act="import" data-hint="Scan, paste or open any message or backup. The wallet works out what it is.">Import</button>
         <button class="btn mini" data-act="exit" aria-label="End session"><span class="wide">End session</span><span class="narrow">End</span></button>` : ''
       }</div>${tabs}
     </header>${body}
     <footer><p>Nothing leaves this page: its Content-Security-Policy blocks all network access, and nothing is written to browser storage. Unaudited software — use at your own risk.</p>
-    <p class="mono">v${VERSION} · core sha256 ${WASM_SHA256.slice(0, 16)}…</p>
-    <p><button class="btn mini" data-act="download-page">${ICON.down}Download this page</button> to keep a copy and open it on an offline device.</p></footer>`;
+    <p class="mono">v${VERSION} · core sha256 ${WASM_SHA256.slice(0, 16)}…</p></footer>`;
   document.querySelectorAll('.out').forEach(mountOut);
+  mountPad();
 }
 
 function mountOut(el) {
@@ -998,6 +1131,7 @@ const actions = {
     forgetRevealed();
     ui.draft = newDraft();
     ui.verify = { ...newDraft(), pubkey: '', sig: '' };
+    ui.entropy = newEntropy();
     run({ op: 'reset' });
   },
   tab: (el) => {
@@ -1014,6 +1148,32 @@ const actions = {
   },
   confirm: (el) => {
     if (confirm(el.dataset.ask)) actions.do(el);
+  },
+  'new-host': () => {
+    const { device, strokes, dice, coins } = ui.entropy;
+    const added = [strokes.length && 'your drawing', dice && plural(dice.length, 'dice roll'), coins && plural(coins.length, 'coin flip')].filter(Boolean);
+    run({ op: 'p_new_host', device, dice, coins, drawing: strokes.flat() });
+    ui.entropy = newEntropy();
+    toast(!added.length ? 'Host key created.'
+      : device ? `Host key created, mixed with ${added.join(', ')}.`
+        : `Host key created from ${added.join(', ')} alone.`);
+  },
+  'entropy-add': (el) => {
+    const e = ui.entropy;
+    e[el.dataset.kind] += el.dataset.value;
+    render();
+  },
+  'entropy-undo': (el) => {
+    ui.entropy[el.dataset.kind] = ui.entropy[el.dataset.kind].slice(0, -1);
+    render();
+  },
+  'entropy-clear': (el) => {
+    const e = ui.entropy;
+    if (el.dataset.kind === 'strokes') {
+      e.strokes = [];
+      e.points = 0;
+    } else e[el.dataset.kind] = '';
+    render();
   },
   import: (el) => openSheet(el.dataset.hint),
   'dkg-start': () => {
@@ -1145,6 +1305,8 @@ function bind(event) {
     const [group, field] = key.split('.');
     ui[group][field] = value;
   }
+  // A few controls change what the rest of the view shows.
+  if (event.target.dataset.render !== undefined) render();
 }
 document.addEventListener('input', bind);
 

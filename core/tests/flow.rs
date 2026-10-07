@@ -303,3 +303,74 @@ fn too_few_nonces_are_refused() {
     assert!(try_call(&mut g.coordinator, json!({ "op": "c_sign_package" })).is_err());
     assert_eq!(state(&mut g.coordinator)["sign"]["stage"], "round1");
 }
+
+#[test]
+fn user_entropy_for_the_host_key() {
+    let host = |w: &mut Wallet, extra: Value| {
+        let mut req = json!({ "op": "p_new_host" });
+        req.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        try_call(w, req).map(|r| r["state"]["host"]["pubkey"].clone())
+    };
+    // A fixed "random" source makes the effect of the added input visible.
+    let fixed = |extra: Value| {
+        let mut w = Wallet::new(Box::new(|buf: &mut [u8]| buf.fill(0x42)));
+        call(&mut w, json!({ "op": "set_role", "role": "participant" }));
+        host(&mut w, extra)
+    };
+    let plain = fixed(json!({})).unwrap();
+    let dice = fixed(json!({ "dice": "16342" })).unwrap();
+    assert_ne!(plain, dice);
+    assert_eq!(dice, fixed(json!({ "dice": "16342" })).unwrap());
+    assert_ne!(dice, fixed(json!({ "dice": "16343" })).unwrap());
+    assert_ne!(dice, fixed(json!({ "coins": "HTTHT" })).unwrap());
+    assert_ne!(
+        dice,
+        fixed(json!({ "dice": "16342", "drawing": [1.5, 2.0, 3.25] })).unwrap()
+    );
+    assert!(fixed(json!({ "dice": "1637" })).is_err());
+    assert!(fixed(json!({ "drawing": [1.0, 2.0] })).is_err());
+    assert!(fixed(json!({ "drawing": [1.0, "x", 3.0] })).is_err());
+    assert!(fixed(json!({ "coins": "HX" })).is_err());
+
+    // With device randomness the same input never gives the same key.
+    let mixed = json!({ "coins": "HTTH" });
+    assert_ne!(
+        host(&mut wallet("participant"), mixed.clone()).unwrap(),
+        host(&mut wallet("participant"), mixed).unwrap()
+    );
+
+    // Without it the key depends on the input alone, and the input has to
+    // carry 128 bits: 50 rolls do, 49 do not, and a drawing never counts.
+    let rolls = "1234561234".repeat(5);
+    let alone = json!({ "device": false, "dice": rolls });
+    let key = host(&mut wallet("participant"), alone.clone()).unwrap();
+    assert_eq!(key, host(&mut wallet("participant"), alone).unwrap());
+    assert_eq!(
+        key,
+        fixed(json!({ "device": false, "dice": rolls })).unwrap()
+    );
+    assert_ne!(key, fixed(json!({ "dice": rolls })).unwrap());
+
+    let alone = |extra: Value| {
+        let mut req = json!({ "device": false });
+        req.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        host(&mut wallet("participant"), req)
+    };
+    let short = alone(json!({ "dice": &rolls[..49] }));
+    assert!(short.unwrap_err().contains("128 bits"));
+
+    let path = (0..5000)
+        .flat_map(|i| [i as f64, 2.0, i as f64])
+        .collect::<Vec<_>>();
+    assert!(alone(json!({ "dice": &rolls[..49], "drawing": path })).is_err());
+    assert!(alone(json!({ "drawing": path })).is_err());
+    assert!(host(&mut wallet("participant"), json!({ "device": false })).is_err());
+    let flips = json!({ "device": false, "coins": "HT".repeat(64) });
+    assert!(host(&mut wallet("participant"), flips).is_ok());
+    let mix = json!({ "device": false, "dice": &rolls[..25], "coins": "HT".repeat(32) });
+    assert!(host(&mut wallet("participant"), mix).is_ok());
+}

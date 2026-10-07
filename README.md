@@ -117,7 +117,12 @@ ChillDKG reference (`transcript || cert`).
   hash, so the page cannot make network requests. Run it on an offline device anyway.
 - Secrets stay in WebAssembly memory and are wiped when dropped. They reach the page only when
   you reveal a backup; the browser gives no way to wipe those copies.
-- Randomness comes from the browser's `crypto.getRandomValues`.
+- Randomness comes from the browser's `crypto.getRandomValues`. When creating a host key you
+  can add your own: a drawing, dice rolls and coin flips. Their hash is XORed with the
+  device's random bytes, so they can only make the key harder to guess. Device randomness
+  can also be turned off; the key is then the hash of your input alone, and the dice and
+  coins must add up to at least 128 bits (50 rolls, 128 flips, or a mix). A drawing is mixed
+  in but not counted, because it cannot be measured.
 - Signing nonces live only in memory and are used once. If a tab is closed mid-session, start
   a new session.
 - Backups are not encrypted. Protect key share and host secret key backups like private keys.
