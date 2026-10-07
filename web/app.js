@@ -448,7 +448,7 @@ function entropyCard() {
           <span class="muted small">Scribble with a finger or the mouse. The path and its timing are used.</span></div>
 
         <div class="field"><div class="head"><span class="label">Dice rolls</span><span class="chip">${plural(e.dice.length, 'roll')}</span></div>
-          <div class="faces">${[1, 2, 3, 4, 5, 6].map((n) => `<button class="face" data-act="entropy-add" data-kind="dice" data-value="${n}" aria-label="Rolled ${n}">${dieFace(n)}</button>`).join('')}</div>
+          <div class="faces dice">${[1, 2, 3, 4, 5, 6].map((n) => `<button class="face" data-act="entropy-add" data-kind="dice" data-value="${n}" aria-label="Rolled ${n}">${dieFace(n)}</button>`).join('')}</div>
           ${tally(e.dice, 'dice')}
           <span class="muted small">Roll a real die and press what it shows, once per roll.</span></div>
 
@@ -935,17 +935,21 @@ function render() {
     body = `<main>${view()}</main>`;
   }
   $('#app').innerHTML = `<header class="top">
-      <div class="bar"><div class="brand">${ICON.logo}<span${S.role ? ' class="wide"' : ''}>FROST Wallet</span></div>${net}
-        <button class="btn mini" data-act="download-page" aria-label="Download this page" title="Save a copy of this page to open on an offline device">${ICON.down}<span class="wide">Download</span></button>${
+      <div class="bar"><div class="brand">${ICON.logo}<span${S.role ? ' class="wide"' : ''}>FROST Wallet</span></div>${net}${
         S.role ? `<span class="chip accent">${S.role === 'participant' ? 'Participant' : 'Coordinator'}</span>
-        <button class="btn mini" data-act="import" data-hint="Scan, paste or open any message or backup. The wallet works out what it is.">Import</button>
-        <button class="btn mini" data-act="exit" aria-label="End session"><span class="wide">End session</span><span class="narrow">End</span></button>` : ''
+        <button class="btn mini" data-act="import" data-hint="Scan, paste or open any message or backup. The wallet works out what it is.">Import</button>` : ''}
+        <button class="btn mini" data-act="download-page" aria-label="Download this page" title="Save a copy of this page to open on an offline device">${ICON.down}<span class="wide">Download</span></button>${
+        S.role ? `<button class="btn mini" data-act="exit" aria-label="End session"><span class="wide">End session</span><span class="narrow">End</span></button>` : ''
       }</div>${tabs}
     </header>${body}
     <footer><p>Nothing leaves this page: its Content-Security-Policy blocks all network access, and nothing is written to browser storage. Unaudited software — use at your own risk.</p>
     <p class="mono">v${VERSION} · core sha256 ${WASM_SHA256.slice(0, 16)}…</p></footer>`;
   document.querySelectorAll('.out').forEach(mountOut);
   mountPad();
+  // On a narrow screen the tab strip scrolls; keep the open tab in sight.
+  const tabStrip = $('.tabs');
+  const openTab = $('.tabs [aria-selected="true"]');
+  if (tabStrip && openTab) tabStrip.scrollLeft = openTab.offsetLeft - (tabStrip.clientWidth - openTab.offsetWidth) / 2;
 }
 
 function mountOut(el) {
